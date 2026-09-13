@@ -1,0 +1,12 @@
+[package]
+name = "ripples"
+version = "0.1.0"
+edition = "2024"
+description = "a dead simple keyboard debouncer for Linux"
+#repository = "https://github.com/belshftl/ripples"
+license = "MIT"
+
+[dependencies]
+
+[dev-dependencies]
+proptest = "1"
