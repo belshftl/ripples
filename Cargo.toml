@@ -6,7 +6,36 @@ description = "a dead simple keyboard debouncer for Linux"
 #repository = "https://github.com/belshftl/ripples"
 license = "MIT"
 
-[dependencies]
+[profile.release]
+lto = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+anyhow = "1"
+evdev = "0.13"
+rustix = { version = "1.1", features = ["event", "fs", "pipe", "time"] }
+lexopt = "0.3"
+signal-hook = { version = "0.4", default-features = false }
+tabular = { version = "0.2", default-features = false }
 
 [dev-dependencies]
 proptest = "1"
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+rustix = { version = "1.1", features = ["process"] }
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "forbid"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+as_conversions = "forbid"
+borrow_as_ptr = "forbid"
+undocumented_unsafe_blocks = "forbid"
+debug_assert_with_mut_call = "warn"
+error_impl_error = "warn"
+exit = "warn"
+partial_pub_fields = "warn"
+str_to_string = "warn"
+useless_let_if_seq = "warn"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
