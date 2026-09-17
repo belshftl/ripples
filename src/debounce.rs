@@ -263,13 +263,14 @@ impl Debouncer {
                     down: st.logical,
                 });
                 st.timer = cfg.mode.lockout().then(|| Timer {
-                    deadline: time + cfg.window,
+                    // don't overflow on a pathologically huge window
+                    deadline: time.saturating_add(cfg.window),
                     kind: TimerKind::Lockout,
                 });
             }
             Policy::Settle => {
                 st.timer = Some(Timer {
-                    deadline: time + cfg.window,
+                    deadline: time.saturating_add(cfg.window),
                     kind: TimerKind::Settle,
                 });
             }
@@ -434,6 +435,23 @@ mod tests {
             assert_eq!(
                 trace(&out),
                 [(0, A, true), (0, B, true), (1, A, false), (100, B, false)],
+                "{mode:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unreasonably_huge_window_doesnt_overflow() {
+        // it must, because wrapping would put it into the past and fire it, and in a debug build
+        // it'd panic; saturating is the more predictable behavior
+        for mode in MODES {
+            let mut deb = Debouncer::new(mode, Duration::from_millis(u64::MAX));
+            let mut out = Vec::new();
+            deb.on_key(ms(1), A, true, &mut out);
+            deb.on_key(ms(2), A, false, &mut out);
+            assert!(
+                deb.next_deadline()
+                    .is_none_or(|deadline| deadline == Nanos::MAX),
                 "{mode:?}"
             );
         }

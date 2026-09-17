@@ -18,6 +18,8 @@ use rustix::ioctl::{IntegerSetter, NoArg, Opcode, Setter, ioctl, opcode};
 use std::ffi::c_int;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 
+use super::events;
+
 const UINPUT_PATH: &str = "/dev/uinput";
 const UINPUT: u8 = b'U';
 
@@ -176,18 +178,16 @@ impl Sink {
             SynchronizationCode::SYN_REPORT.0,
             0,
         ));
-        write_all(&self.fd, as_bytes(&self.batch))
+        events::write_all(&self.fd, &self.batch)
     }
 
     /// Events written to the virtual device from elsewhere, i.e. LED state.
     pub fn feedback(&self, out: &mut Vec<InputEvent>) -> std::io::Result<()> {
         let mut buf = [InputEvent::new(0, 0, 0); 16];
         loop {
-            match rustix::io::read(&self.fd, as_bytes_mut(&mut buf)) {
-                Ok(0) | Err(Errno::AGAIN) => return Ok(()),
-                Ok(r) => out.extend_from_slice(&buf[..r / size_of::<InputEvent>()]),
-                Err(Errno::INTR) => {}
-                Err(e) => return Err(e.into()),
+            match events::read(&self.fd, &mut buf)? {
+                0 => return Ok(()),
+                count => out.extend_from_slice(&buf[..count]),
             }
         }
     }
@@ -269,29 +269,4 @@ fn owned_leds(leds: &AttributeSetRef<LedCode>) -> AttributeSet<LedCode> {
         set.insert(led);
     }
     set
-}
-
-fn write_all(fd: &OwnedFd, mut bytes: &[u8]) -> std::io::Result<()> {
-    while !bytes.is_empty() {
-        match rustix::io::write(fd, bytes) {
-            Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
-            Ok(w) => bytes = &bytes[w..],
-            Err(Errno::INTR) => {}
-            Err(e) => return Err(e.into()),
-        }
-    }
-    Ok(())
-}
-
-fn as_bytes(events: &[InputEvent]) -> &[u8] {
-    // SAFETY: `InputEvent` is ffi-compatible with `struct input_event`, whose fields are all plain
-    // integers, so every bit pattern is a valid value, and there is no padding. therefore, the cast
-    // is sound in both directions
-    unsafe { std::slice::from_raw_parts(events.as_ptr().cast::<u8>(), size_of_val(events)) }
-}
-
-fn as_bytes_mut(events: &mut [InputEvent]) -> &mut [u8] {
-    let len = size_of_val(events);
-    // SAFETY: see above in `as_bytes`
-    unsafe { std::slice::from_raw_parts_mut(events.as_mut_ptr().cast::<u8>(), len) }
 }

@@ -46,10 +46,16 @@ impl Drop for DropChild {
     }
 }
 
-fn terminate(child: &DropChild) {
+fn signal(child: &DropChild, sig: Signal) {
     let pid = i32::try_from(child.0.id()).expect("a pid fits in an i32");
     let pid = Pid::from_raw(pid).expect("the child has a nonzero pid");
-    kill_process(pid, Signal::TERM).expect("send SIGTERM");
+    kill_process(pid, sig).expect("send a signal to the child");
+}
+
+fn open_as_desktop() -> Device {
+    let (_, desktop) = wait_for_device(SOURCE_NAME, Duration::from_secs(5));
+    desktop.set_nonblocking(true).unwrap();
+    desktop
 }
 
 fn source_id() -> InputId {
@@ -82,13 +88,17 @@ fn make_source() -> Sink {
 }
 
 fn start_child(mode: &str) -> DropChild {
+    start_child_with(mode, Duration::from_millis(100))
+}
+
+fn start_child_with(mode: &str, rescan: Duration) -> DropChild {
     let (source_path, _) = wait_for_device(SOURCE_NAME, Duration::from_secs(5));
     let child = Command::new(env!("CARGO_BIN_EXE_ripples"))
         .arg(&source_path)
         .args(["-m", mode])
         .args(["-w", "20"])
         .args(["--virtual-name", SINK_NAME])
-        .args(["--device-rescan-interval", "100"])
+        .args(["--device-rescan-interval", &rescan.as_millis().to_string()])
         .arg("--wait-for-device")
         .stdin(Stdio::null())
         .spawn()
@@ -330,7 +340,7 @@ fn shutting_down_releases_the_keyboard() {
     press(&mut source, KeyCode::KEY_A, true);
     assert_eq!(drain(&mut sink, WINDOW * 2), [(KeyCode::KEY_A.0, true)]);
 
-    terminate(&child);
+    signal(&child, Signal::TERM);
     assert_eq!(
         drain(&mut sink, Duration::from_millis(400)),
         [(KeyCode::KEY_A.0, false)],
@@ -467,28 +477,101 @@ fn a_held_key_repeats_at_the_rate_the_keyboard_was_set_to() {
 fn the_grab_waits_for_a_held_key_to_be_released() {
     let mut source = make_source();
     sleep(Duration::from_millis(100));
+    let mut desktop = open_as_desktop();
 
     press(&mut source, KeyCode::KEY_A, true);
     let _child = start_child("mixed");
-    sleep(Duration::from_millis(700));
-
-    assert!(
-        find_device(SINK_NAME).is_none(),
-        "the child should not have grabbed the keyboard if it has a held key",
-    );
-
-    press(&mut source, KeyCode::KEY_A, false);
     let mut sink = open_sink();
+    sleep(Duration::from_millis(400));
+    press(&mut source, KeyCode::KEY_A, false);
 
+    sleep(Duration::from_millis(200));
+
+    assert_eq!(
+        drain(&mut desktop, WINDOW),
+        [(KeyCode::KEY_A.0, true), (KeyCode::KEY_A.0, false)],
+        "the desktop should have seen the release before the child grabbed the keyboard",
+    );
+    // that keystroke should have gone to whatever was reading the keyboard at the time
     assert_eq!(drain(&mut sink, WINDOW * 4), []);
 
-    // make sure it works normally afterwards
+    // the keyboard should belong to the child now
     press(&mut source, KeyCode::KEY_B, true);
     sleep(WINDOW * 5);
     press(&mut source, KeyCode::KEY_B, false);
     assert_eq!(
         drain(&mut sink, WINDOW * 4),
         [(KeyCode::KEY_B.0, true), (KeyCode::KEY_B.0, false)],
+    );
+    assert_eq!(drain(&mut desktop, WINDOW), []);
+}
+
+#[test]
+#[ignore = "needs root and /dev/uinput"]
+fn a_key_held_when_the_keyboard_replugs_does_not_get_stuck() {
+    let source = make_source();
+    sleep(Duration::from_millis(100));
+    let _child = start_child_with("mixed", Duration::from_millis(300));
+    let mut sink = open_sink();
+    drain(&mut sink, Duration::from_millis(100));
+
+    drop(source);
+    let mut source = make_source();
+    let mut desktop = open_as_desktop();
+    // pressed before the first repoll from the child and held past it
+    press(&mut source, KeyCode::KEY_A, true);
+    sleep(Duration::from_millis(500));
+    press(&mut source, KeyCode::KEY_A, false);
+
+    sleep(Duration::from_millis(400));
+
+    assert_eq!(
+        drain(&mut desktop, WINDOW),
+        [(KeyCode::KEY_A.0, true), (KeyCode::KEY_A.0, false)],
+        "the desktop should have seen the release before the child regrabbed the keyboard",
+    );
+
+    press(&mut source, KeyCode::KEY_B, true);
+    sleep(WINDOW * 5);
+    press(&mut source, KeyCode::KEY_B, false);
+    assert_eq!(
+        drain(&mut sink, WINDOW * 4),
+        [(KeyCode::KEY_B.0, true), (KeyCode::KEY_B.0, false)],
+        "the child should have the keyboard grabbed",
+    );
+}
+
+#[test]
+#[ignore = "needs root and /dev/uinput"]
+fn a_stall_long_enough_to_drop_events_does_not_leave_a_key_stuck() {
+    let mut source = make_source();
+    sleep(Duration::from_millis(100));
+    let child = start_child("mixed");
+    let mut sink = open_sink();
+    drain(&mut sink, Duration::from_millis(100));
+
+    press(&mut source, KeyCode::KEY_A, true);
+    assert_eq!(drain(&mut sink, WINDOW * 2), [(KeyCode::KEY_A.0, true)]);
+
+    signal(&child, Signal::STOP);
+    sleep(Duration::from_millis(50));
+    // force dropping events by artificially filling the queue
+    for i in 0..4096 {
+        source
+            .emit(&[InputEvent::new(
+                EventType::LED.0,
+                LedCode::LED_MUTE.0,
+                i32::from(i % 2 == 0),
+            )])
+            .unwrap();
+    }
+    press(&mut source, KeyCode::KEY_A, false);
+    signal(&child, Signal::CONT);
+
+    assert_eq!(
+        drain(&mut sink, Duration::from_millis(500)),
+        [(KeyCode::KEY_A.0, false)],
+        "the release should have went through",
     );
 }
 

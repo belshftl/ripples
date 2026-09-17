@@ -14,7 +14,8 @@ use std::time::{Duration, Instant};
 
 use super::cli::{self, CliResult};
 use super::device::{self, Fingerprint};
-use super::pipeline::Pipeline;
+use super::events;
+use super::pipeline::{Fed, Pipeline};
 use super::signal::Signals;
 use super::virtdev::Sink;
 use crate::debounce::Nanos;
@@ -34,6 +35,7 @@ struct Source {
 }
 
 /// Result of a successful read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Pumped {
     Read,
     Empty,
@@ -50,6 +52,7 @@ struct App {
     next_rescan: Option<Nanos>,
     leds: BTreeMap<u16, i32>, // btreemap for deterministic iter order
     feedback: Vec<InputEvent>,
+    last_stamp: Nanos,
 }
 
 struct Ready {
@@ -132,9 +135,8 @@ mouse doesn't error out and just makes the device unusable.
         bail!("--virtual-name must differ from the name of the source device");
     }
 
-    wait_until_idle(&mut dev, &signals).context("waiting for the keyboard to go idle")?;
-
     let sink = Sink::create(&dev, &virtual_name)?;
+    wait_until_idle(&mut dev, &signals).context("waiting for the keyboard to go idle")?;
     attach(&mut dev).with_context(|| format!("attaching to {fingerprint}"))?;
 
     eprintln!(
@@ -156,6 +158,7 @@ mouse doesn't error out and just makes the device unusable.
         next_rescan: None,
         leds: BTreeMap::new(),
         feedback: Vec::new(),
+        last_stamp: 0,
     };
 
     app.run(&signals)?;
@@ -286,29 +289,45 @@ impl App {
     }
 
     fn pump(&mut self) -> anyhow::Result<Pumped> {
-        let events: Vec<InputEvent> = {
-            let Some(src) = self.source.as_mut() else {
+        let mut buf = [InputEvent::new(0, 0, 0); 64];
+        let count = {
+            let Some(src) = self.source.as_ref() else {
                 return Ok(Pumped::Empty);
             };
-            match src.dev.fetch_events() {
-                Ok(events) => events.collect(),
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    return Ok(Pumped::Empty);
-                }
+            match events::read(&src.dev, &mut buf) {
+                Ok(0) => return Ok(Pumped::Empty),
+                Ok(count) => count,
                 Err(e) if device::is_disconnect(&e) => return Ok(Pumped::Disconnected),
                 Err(e) => return Err(e).context("reading from the keyboard"),
             }
         };
 
-        for event in events {
+        for &event in &buf[..count] {
             let time = device::stamp(&event);
-            if self.pipe.feed(event, time) {
-                self.flush()?;
+            self.last_stamp = time;
+            match self.pipe.feed(event, time) {
+                Fed::Nothing => {}
+                Fed::Report => self.flush()?,
+                Fed::Dropped => self.resync()?,
             }
         }
 
         self.flush()?;
         Ok(Pumped::Read)
+    }
+
+    fn resync(&mut self) -> anyhow::Result<()> {
+        let Some(src) = self.source.as_ref() else {
+            return Ok(());
+        };
+        let held: Vec<u16> = match src.dev.get_key_state() {
+            Ok(held) => held.iter().map(|key| key.0).collect(),
+            // the next read should report the disconnect
+            Err(e) if device::is_disconnect(&e) => return Ok(()),
+            Err(e) => return Err(e).context("reading which keys the keyboard has down"),
+        };
+        self.pipe.resync(&held, self.last_stamp);
+        Ok(())
     }
 
     fn flush(&mut self) -> anyhow::Result<()> {
@@ -329,7 +348,7 @@ impl App {
         }
         let now = device::now();
         self.pipe.release_all(now);
-        self.next_rescan = Some(now + self.rescan);
+        self.next_rescan = Some(now.saturating_add(self.rescan));
         self.flush()
     }
 
@@ -342,12 +361,31 @@ impl App {
             Some(due) if due <= now => {}
             _ => return Ok(()),
         }
-        self.next_rescan = Some(now + self.rescan);
+        self.next_rescan = Some(now.saturating_add(self.rescan));
 
         let Some((path, mut dev)) = device::find_matching(&self.fingerprint, &self.virtual_name)
         else {
             return Ok(());
         };
+
+        // the desktop opened the keyboard we're polling for as soon as it appeared, so a key that
+        // was pressed before the grab and released only after it would leave it stuck
+        match held_keys(&dev) {
+            Ok(held) if held.is_empty() => {}
+            Ok(held) => {
+                eprintln!(
+                    "{held:?} is held on device {}, so can't regrab yet; trying again later",
+                    device::describe_path(&path)
+                );
+                return Ok(());
+            }
+            Err(e) => {
+                eprintln!(
+                    "device {} is not usable yet after the replug ({e:#}); trying again later",
+                    device::describe_path(&path)
+                );
+            }
+        }
 
         match attach(&mut dev) {
             Ok(()) => {
@@ -368,7 +406,7 @@ impl App {
             }
             Err(e) => {
                 eprintln!(
-                    "device {} is not usable yet after the replug ({e:#}); retrying",
+                    "device {} is not usable yet after the replug ({e:#}); trying again later",
                     device::describe_path(&path)
                 );
             }
@@ -401,15 +439,6 @@ impl App {
     }
 }
 
-fn attach(dev: &mut Device) -> anyhow::Result<()> {
-    dev.set_nonblocking(true)
-        .context("setting the device to nonblocking")?;
-    device::use_monotonic_timestamps(dev)?;
-    dev.grab()
-        .context("grabbing the keyboard for exclusive use")?;
-    Ok(())
-}
-
 fn wait_until_idle(dev: &mut Device, signals: &Signals) -> anyhow::Result<()> {
     dev.set_nonblocking(true)
         .context("setting the device to nonblocking")?;
@@ -419,11 +448,7 @@ fn wait_until_idle(dev: &mut Device, signals: &Signals) -> anyhow::Result<()> {
     let mut announced = false;
 
     loop {
-        let held: Vec<KeyCode> = dev
-            .get_key_state()
-            .context("reading which keys the keyboard has down")?
-            .iter()
-            .collect();
+        let held = held_keys(dev)?;
         if held.is_empty() {
             break;
         }
@@ -447,18 +472,31 @@ key as down may keep thinking it's down until a new key event / refocus / etc. h
         }
     }
 
-    discard_pending(dev)
+    Ok(())
 }
 
-fn discard_pending(dev: &mut Device) -> anyhow::Result<()> {
-    match dev.fetch_events() {
-        Ok(events) => {
-            for _ in events {}
-            Ok(())
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(()),
-        Err(e) => Err(e).context("reading from the keyboard"),
-    }
+fn held_keys(dev: &Device) -> anyhow::Result<Vec<KeyCode>> {
+    Ok(dev
+        .get_key_state()
+        .context("reading which keys the keyboard has down")?
+        .iter()
+        .collect())
+}
+
+fn discard_pending(dev: &Device) -> anyhow::Result<()> {
+    let mut buf = [InputEvent::new(0, 0, 0); 64];
+    while events::read(&dev, &mut buf).context("reading from the keyboard")? > 0 {}
+    Ok(())
+}
+
+fn attach(dev: &mut Device) -> anyhow::Result<()> {
+    dev.set_nonblocking(true)
+        .context("setting the device to nonblocking")?;
+    discard_pending(dev)?;
+    device::use_monotonic_timestamps(dev)?;
+    dev.grab()
+        .context("grabbing the keyboard for exclusive use")?;
+    Ok(())
 }
 
 fn open_initial(

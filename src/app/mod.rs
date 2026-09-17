@@ -3,6 +3,7 @@
 
 pub mod cli;
 pub mod device;
+pub mod events;
 pub mod main;
 pub mod pipeline;
 pub mod signal;
