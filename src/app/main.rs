@@ -8,7 +8,9 @@ use evdev::{Device, EventType, InputEvent, KeyCode, SynchronizationCode};
 use rustix::event::{PollFd, PollFlags, poll};
 use rustix::io::Errno;
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::os::fd::AsFd;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -76,6 +78,20 @@ try '--help' for more info
             device::list();
             return Ok(0);
         }
+        CliResult::StablePath(path) => {
+            if let Some(symlink) = device::find_stable_symlink(&path)? {
+                let bytes = symlink.as_os_str().as_bytes();
+                let mut stdout = std::io::stdout().lock();
+                stdout.write_all(bytes)?;
+                stdout.write_all(b"\n")?;
+                return Ok(0);
+            }
+            eprintln!(
+                "no stable symlink found for device {}; if that's a real device, strange. maybe you're accidentally passing a virtual device..?",
+                path.display()
+            );
+            return Ok(1);
+        }
         CliResult::Help => {
             eprint!("\
 usage: {argv0} [options] device
@@ -90,6 +106,7 @@ options:
   --device-rescan-interval <MS>   how often to rescan for the device while unplugged, in ms (default: 500)
   --wait-for-device               wait for the device to appear at startup if it's missing rather than error
   -l, --list                      list available devices and exit
+  -p, --stable-path <DEVICE>      get a stable symlink path for a /dev/input/event* device node, for convenience
   -h, --help                      display this help and exit
   -V, --version                   output version information and exit
 

@@ -33,6 +33,7 @@ pub struct Cli {
 pub enum CliResult {
     Usage,
     List,
+    StablePath(PathBuf),
     Help,
     Version,
     Cli(Cli),
@@ -103,6 +104,9 @@ pub fn parse() -> anyhow::Result<CliResult> {
             }
             Long("wait-for-device") => wait_for_device = true,
             Short('l') | Long("list") => return Ok(CliResult::List),
+            Short('p') | Long("stable-path") => {
+                return Ok(CliResult::StablePath(PathBuf::from(parser.value()?)));
+            }
             Short('h') | Long("help") => return Ok(CliResult::Help),
             Short('V') | Long("version") => return Ok(CliResult::Version),
             Value(value) => {

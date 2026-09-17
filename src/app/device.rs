@@ -10,11 +10,14 @@ use rustix::io::Errno;
 use rustix::ioctl::{Setter, opcode};
 use rustix::time::{ClockId, clock_gettime};
 use std::ffi::c_int;
+use std::fs::canonicalize;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 use tabular::{Row, Table, row};
 
 use crate::debounce::Nanos;
+
+const DEV_SYMLINK_DIRS: [&str; 2] = ["/dev/input/by-id", "/dev/input/by-path"];
 
 /// Identity used to recognize a device on replug.
 ///
@@ -134,7 +137,7 @@ pub fn has_keys(dev: &Device) -> bool {
 /// Opens the keyboard at `path`. Returns `Ok(None)` if it's not there (ENOENT), since that's an
 /// ordinary state (not plugged in yet) rather than an error.
 pub fn find(path: &Path) -> anyhow::Result<Option<(PathBuf, Device)>> {
-    let real = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let real = canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     match Device::open(&real) {
         Ok(dev) => Ok(Some((real, dev))),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -181,6 +184,44 @@ pub fn list() {
         table.add_row(row);
     }
     print!("{table}");
+}
+
+/// Finds a stable-path symlink for a `/dev/input/event*` node, first searching in
+/// `/dev/input/by-id/` and then in `/dev/input/by-path/`.
+/// Returns `Ok(None)` if no errors happened during the search but a symlink simply wasn't found.
+pub fn find_stable_symlink(path: &Path) -> anyhow::Result<Option<PathBuf>> {
+    let target = canonicalize(path).with_context(|| format!("resolving {}", path.display()))?;
+
+    for dir in DEV_SYMLINK_DIRS {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e).with_context(|| format!("reading {dir}")),
+        };
+
+        let mut matches = Vec::new();
+        for entry in entries {
+            let entry = entry.with_context(|| format!("reading an entry in {dir}"))?;
+            let link = entry.path();
+
+            match canonicalize(&link) {
+                Ok(resolved) if resolved == target => matches.push(link),
+                Ok(_) => {}
+                // dangling symlink, or udev removed it mid scan
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(e).with_context(|| format!("resolving {}", link.display()));
+                }
+            }
+        }
+
+        if !matches.is_empty() {
+            matches.sort_unstable();
+            return Ok(matches.into_iter().next());
+        }
+    }
+
+    Ok(None)
 }
 
 /// `EVIOCSCLOCKID`, i.e. `_IOW('E', 0xa0, int)`.

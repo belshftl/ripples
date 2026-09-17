@@ -5,7 +5,7 @@ edition = "2024"
 description = "a dead simple keyboard debouncer for Linux"
 repository = "https://github.com/belshftl/ripples"
 license = "MIT"
-#readme = "README.md"
+readme = "README.md"
 keywords = ["daemon", "debounce", "evdev", "keyboard", "linux"]
 categories = ["command-line-utilities"]
 
@@ -28,7 +28,7 @@ assets = [
     ["package/99-ripples.rules", "usr/lib/udev/rules.d/", "644"],
     ["package/ripples.modules-load", "usr/lib/modules-load.d/ripples.conf", "644"],
     ["package/ripples.conf", "etc/", "644"],
-#    ["README.md", "usr/share/doc/ripples/", "644"],
+    ["README.md", "usr/share/doc/ripples/", "644"],
 ]
 # conf-files is strictly for files outside /etc, so it's not necessary here for our config file
 systemd-units = { unit-scripts = "package", enable = false, start = false }
@@ -42,7 +42,7 @@ assets = [
     { source = "package/99-ripples.rules", dest = "/usr/lib/udev/rules.d/99-ripples.rules", mode = "644" },
     { source = "package/ripples.modules-load", dest = "/usr/lib/modules-load.d/ripples.conf", mode = "644" },
     { source = "package/ripples.conf", dest = "/etc/ripples.conf", mode = "644", config = "noreplace" },
-#    { source = "README.md", dest = "/usr/share/doc/ripples/README.md", mode = "644", doc = true },
+    { source = "README.md", dest = "/usr/share/doc/ripples/README.md", mode = "644", doc = true },
 ]
 # note: a nonexistent script path is silently used as the script text itself so these must stay
 # up to date if the paths change
@@ -81,3 +81,4 @@ str_to_string = "warn"
 useless_let_if_seq = "warn"
 must_use_candidate = "allow"
 missing_errors_doc = "allow"
+too_many_lines = "allow"
