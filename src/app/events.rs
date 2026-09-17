@@ -1,6 +1,20 @@
 // SPDX-FileCopyrightText: 2026 belshftl
 // SPDX-License-Identifier: MIT
 
+//! Reading/writing `input_event`s off an fd.
+//!
+//! The keyboard is read here rather than `evdev::Device::fetch_events`; on a non-blocking fd:
+//! - after a `SYN_DROPPED`, it stops at the end of that packet and keeps the events afterward in
+//!   its own buffer, not the kernel queue
+//! - its next call rereads before handing any of that over, and if the kernel queue is empty, that
+//!   fails with `WouldBlock`, so the resync it just computed gets thrown away
+//! - `poll` for those events never wakes because, well, the kernel queue is empty
+//!
+//! It's honestly worth considering switching to another crate if I ever come back to this program.
+//! This is not the first time the `evdev` crate has to be worked around rather than cooperated with.
+//! `evdevil` looks promising and seems to support declaring LED capabilities on virtual devices, so
+//! that's a good start. Haven't looked into it more past the surface level.
+
 use evdev::InputEvent;
 use rustix::io::Errno;
 use std::os::fd::AsFd;

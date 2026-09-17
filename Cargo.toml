@@ -22,7 +22,7 @@ Grabs a raw /dev/input keyboard, applies a debounce filter against repeated key 
 or chattering switch, and emits the result on a virtual device. Includes a systemd template unit, \
 one instance per keyboard."""
 maintainer-scripts = "package/debian/"
-depends = "$auto, systemd | systemd-standalone-sysusers | systemd-sysusers"
+depends = "libc6 (>= 2.34), libgcc-s1, systemd | systemd-standalone-sysusers | systemd-sysusers"
 assets = [
     ["target/release/ripples", "usr/bin/", "755"],
     ["package/99-ripples.rules", "usr/lib/udev/rules.d/", "644"],

@@ -101,6 +101,7 @@ impl DeviceListingRank {
         if name.contains("touchpad")
             || name.contains("trackpad")
             || name.contains("mouse")
+            || name.contains("tablet")
             || name.contains("speaker")
             || name.contains("headphone")
             || name.contains("headset")
