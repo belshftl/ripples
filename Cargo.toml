@@ -3,11 +3,53 @@ name = "ripples"
 version = "0.1.0"
 edition = "2024"
 description = "a dead simple keyboard debouncer for Linux"
-#repository = "https://github.com/belshftl/ripples"
+repository = "https://github.com/belshftl/ripples"
 license = "MIT"
+#readme = "README.md"
+keywords = ["daemon", "debounce", "evdev", "keyboard", "linux"]
+categories = ["command-line-utilities"]
 
 [profile.release]
 lto = true
+strip = true
+
+[package.metadata.deb]
+maintainer = "belshftl <belshftl@proton.me>"
+copyright = "2026 belshftl <belshftl@proton.me>"
+section = "utils"
+extended-description = """\
+Grabs a raw /dev/input keyboard, applies a debounce filter against repeated key edges from a worn \
+or chattering switch, and emits the result on a virtual device. Includes a systemd template unit, \
+one instance per keyboard."""
+maintainer-scripts = "package/debian/"
+depends = "$auto, systemd | systemd-standalone-sysusers | systemd-sysusers"
+assets = [
+    ["target/release/ripples", "usr/bin/", "755"],
+    ["package/99-ripples.rules", "usr/lib/udev/rules.d/", "644"],
+    ["package/ripples.modules-load", "usr/lib/modules-load.d/ripples.conf", "644"],
+    ["package/ripples.conf", "etc/", "644"],
+#    ["README.md", "usr/share/doc/ripples/", "644"],
+]
+# conf-files is strictly for files outside /etc, so it's not necessary here for our config file
+systemd-units = { unit-scripts = "package", enable = false, start = false }
+
+[package.metadata.generate-rpm]
+packager = "belshftl <belshftl@proton.me>"
+assets = [
+    { source = "target/release/ripples", dest = "/usr/bin/ripples", mode = "755" },
+    { source = "package/ripples@.service", dest = "/usr/lib/systemd/system/ripples@.service", mode = "644" },
+    { source = "package/ripples.sysusers", dest = "/usr/lib/sysusers.d/ripples.conf", mode = "644" },
+    { source = "package/99-ripples.rules", dest = "/usr/lib/udev/rules.d/99-ripples.rules", mode = "644" },
+    { source = "package/ripples.modules-load", dest = "/usr/lib/modules-load.d/ripples.conf", mode = "644" },
+    { source = "package/ripples.conf", dest = "/etc/ripples.conf", mode = "644", config = "noreplace" },
+#    { source = "README.md", dest = "/usr/share/doc/ripples/README.md", mode = "644", doc = true },
+]
+# note: a nonexistent script path is silently used as the script text itself so these must stay
+# up to date if the paths change
+requires = { systemd = "*" }
+post_install_script = "package/rpm/post.sh"
+pre_uninstall_script = "package/rpm/preun.sh"
+post_uninstall_script = "package/rpm/postun.sh"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 anyhow = "1"

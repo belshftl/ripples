@@ -1,0 +1,25 @@
+#!/bin/sh
+set -e
+
+# the generated postinst from cargo-deb does `systemd-sysusers` for our uinput group, and that must
+# come before the udev rule that gets applied below
+#DEBHELPER#
+
+if [ "$1" = 'configure' ]; then
+	if [ -d /run/udev ]; then
+		udevadm control --reload || true
+	fi
+	# the modules-load.d entry covers future boots but for now load it manually
+	modprobe uinput 2>/dev/null || true
+	if [ -d /run/udev ]; then
+		udevadm trigger --action=change --settle /sys/devices/virtual/misc/uinput 2>/dev/null || true
+	fi
+
+	if [ -d /run/systemd/system ]; then
+		systemctl daemon-reload || true
+		# on upgrades, $2 is the previously configured version
+		if [ -n "$2" ]; then
+			systemctl try-restart 'ripples@*.service' || true
+		fi
+	fi
+fi

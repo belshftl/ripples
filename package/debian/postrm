@@ -1,0 +1,21 @@
+#!/bin/sh
+set -e
+
+#DEBHELPER#
+
+case "$1" in
+remove|purge)
+	if [ -d /run/udev ]; then
+		udevadm control --reload || true
+	fi
+	;;
+esac
+
+# instances created with `systemctl enable` aren't tracked by deb-systemd-helper
+if [ "$1" = 'purge' ]; then
+	rm -f /etc/systemd/system/*.wants/ripples@*.service
+fi
+
+if [ -d /run/systemd/system ]; then
+	systemctl daemon-reload || true
+fi

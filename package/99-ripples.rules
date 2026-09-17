@@ -1,0 +1,4 @@
+# the `input` group doesn't have /dev/uinput perms by default, and granting blanket access would
+# mean any user in `input` can inject keystrokes and make virtual devices, which is more than just
+# being able to read from any input device, so use a dedicated group
+KERNEL=="uinput", SUBSYSTEM=="misc", GROUP="ripples-uinput", MODE="0660", OPTIONS+="static_node=uinput"

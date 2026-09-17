@@ -4,11 +4,17 @@
 //! E2E test done by making a virtual keyboard, running the binary on it, and reading back the
 //! events it produces.
 //!
-//! Ignored by default, as it needs write access to `/dev/uinput` and read access to `/dev/input`;
-//! run with:
+//! Ignored by default, as all the tests need write access to `/dev/uinput` and read access to
+//! `/dev/input`, and one of them also needs strace installed; run with:
 //! ```sh
 //! cargo build && sudo -E "$(which cargo)" test --test e2e -- --ignored --test-threads=1
 //! ```
+//!
+//! It is recommended to either run this in a temporary container/VM in some way or to clean out all
+//! of your cargo cache afterwards (both global and in this project), since otherwise it tends to
+//! leave behind cache files owned by root that cargo then can't open or remove, causing it to fail.
+//! `sudo rm -rf ~/.cargo/registry` + `sudo cargo clean` seems to have been sufficient for me, but
+//! be careful with deleting things from your system as root.
 
 #![cfg(target_os = "linux")]
 
@@ -18,7 +24,7 @@ use evdev::{
 };
 use rustix::io::Errno;
 use rustix::process::{Pid, Signal, kill_process};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
@@ -30,7 +36,7 @@ const SOURCE_NAME: &str = "ripples e2e test source";
 const SINK_NAME: &str = "ripples e2e test sink";
 const WINDOW: Duration = Duration::from_millis(20);
 
-/// Kills the child on drop, i.e. when the test ends.
+/// Kills the child on drop.
 struct DropChild(Child);
 
 impl Drop for DropChild {
@@ -88,6 +94,44 @@ fn start_child(mode: &str) -> DropChild {
         .spawn()
         .expect("spawn the child");
     DropChild(child)
+}
+
+/// Detaches strace from the child on drop.
+struct Tracer(Child);
+
+impl Drop for Tracer {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Makes every `read(2)` syscall the child does on `path` return `delay` late by using strace's
+/// fault injection, allowing arbitrarily widening the race window between reading the keyboard and
+/// running the timers from a handful of microseconds to `delay`.
+fn delay_reads(child: &DropChild, path: &Path, delay: Duration) -> Tracer {
+    let spawned = Command::new("strace")
+        .args(["-qq", "-o", "/dev/null", "-e", "trace=read"])
+        .arg(format!("-einject=read:delay_exit={}", delay.as_micros()))
+        .arg("-P")
+        .arg(path)
+        .args(["-p", &child.0.id().to_string()])
+        .stdin(Stdio::null())
+        .spawn()
+        .expect("spawn strace, which this test needs installed");
+    let tracer = Tracer(spawned);
+
+    let status = format!("/proc/{}/status", child.0.id());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !std::fs::read_to_string(&status)
+        .expect("read the child's status")
+        .lines()
+        .any(|line| line.starts_with("TracerPid:") && line.trim_end() != "TracerPid:\t0")
+    {
+        assert!(Instant::now() < deadline, "strace never attached");
+        sleep(Duration::from_millis(10));
+    }
+    tracer
 }
 
 fn find_device(name: &str) -> Option<(PathBuf, Device)> {
@@ -445,5 +489,37 @@ fn the_grab_waits_for_a_held_key_to_be_released() {
     assert_eq!(
         drain(&mut sink, WINDOW * 4),
         [(KeyCode::KEY_B.0, true), (KeyCode::KEY_B.0, false)],
+    );
+}
+
+#[test]
+#[ignore = "needs root, /dev/uinput, and strace"]
+fn a_bounce_read_late_still_cancels_the_pending_release() {
+    let mut source = make_source();
+    sleep(Duration::from_millis(100));
+    let child = start_child("mixed");
+    let mut sink = open_sink();
+    drain(&mut sink, Duration::from_millis(100));
+
+    let (source_path, _) = wait_for_device(SOURCE_NAME, Duration::from_secs(5));
+    let _tracer = delay_reads(&child, &source_path, Duration::from_millis(50));
+
+    // long enough for the delayed read of the press to return and the child to be polling again, so
+    // the next read gets just the release
+    press(&mut source, KeyCode::KEY_A, true);
+    sleep(Duration::from_millis(75));
+    press(&mut source, KeyCode::KEY_A, false);
+
+    // within the 20ms window and the artificial 50ms read delay
+    sleep(Duration::from_millis(5));
+
+    press(&mut source, KeyCode::KEY_A, true);
+    sleep(Duration::from_millis(10));
+    press(&mut source, KeyCode::KEY_A, false);
+
+    assert_eq!(
+        drain(&mut sink, Duration::from_millis(500)),
+        [(KeyCode::KEY_A.0, true), (KeyCode::KEY_A.0, false)],
+        "the bounce should have cancelled the pending release"
     );
 }

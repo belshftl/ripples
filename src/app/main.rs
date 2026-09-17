@@ -35,7 +35,8 @@ struct Source {
 
 /// Result of a successful read.
 enum Pumped {
-    Continue,
+    Read,
+    Empty,
     Disconnected,
 }
 
@@ -165,7 +166,9 @@ mouse doesn't error out and just makes the device unusable.
 impl App {
     fn run(&mut self, signals: &Signals) -> anyhow::Result<()> {
         loop {
-            self.pipe.tick(device::now());
+            let now = device::now();
+            self.drain_source()?;
+            self.pipe.tick(now);
             self.flush()?;
             self.try_reconnect()?;
 
@@ -176,8 +179,10 @@ impl App {
             if ready.sink.contains(PollFlags::IN) {
                 self.on_sink_feedback()?;
             }
-            if let Some(revents) = ready.device {
-                self.on_device_ready(revents)?;
+            if ready.device.is_some_and(|revents| {
+                revents.intersects(PollFlags::ERR | PollFlags::HUP | PollFlags::NVAL)
+            }) {
+                self.on_disconnect()?;
             }
         }
     }
@@ -270,28 +275,25 @@ impl App {
         }
     }
 
-    fn on_device_ready(&mut self, revents: PollFlags) -> anyhow::Result<()> {
-        if revents.intersects(PollFlags::ERR | PollFlags::HUP | PollFlags::NVAL) {
-            return self.on_disconnect();
-        }
-        if !revents.contains(PollFlags::IN) {
-            return Ok(());
-        }
-        match self.pump()? {
-            Pumped::Continue => Ok(()),
-            Pumped::Disconnected => self.on_disconnect(),
+    fn drain_source(&mut self) -> anyhow::Result<()> {
+        loop {
+            match self.pump()? {
+                Pumped::Read => {}
+                Pumped::Empty => return Ok(()),
+                Pumped::Disconnected => return self.on_disconnect(),
+            }
         }
     }
 
     fn pump(&mut self) -> anyhow::Result<Pumped> {
         let events: Vec<InputEvent> = {
             let Some(src) = self.source.as_mut() else {
-                return Ok(Pumped::Continue);
+                return Ok(Pumped::Empty);
             };
             match src.dev.fetch_events() {
                 Ok(events) => events.collect(),
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    return Ok(Pumped::Continue);
+                    return Ok(Pumped::Empty);
                 }
                 Err(e) if device::is_disconnect(&e) => return Ok(Pumped::Disconnected),
                 Err(e) => return Err(e).context("reading from the keyboard"),
@@ -306,7 +308,7 @@ impl App {
         }
 
         self.flush()?;
-        Ok(Pumped::Continue)
+        Ok(Pumped::Read)
     }
 
     fn flush(&mut self) -> anyhow::Result<()> {
